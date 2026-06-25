@@ -1,0 +1,16 @@
+# 绝不提交真实密钥
+.env
+
+# 数据 / 缓存 / 日志
+*.h5
+RD-Agent/
+qlib_data/
+log/
+mlruns/
+pickle_cache/
+*.log
+
+# python
+__pycache__/
+*.pyc
+.venv/
