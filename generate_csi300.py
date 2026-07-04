@@ -11,12 +11,14 @@ workers re-import this module. Without the guard the top-level extraction
 re-runs in every child → recursive process spawn storm (freeze_support error).
 """
 import multiprocessing
+import os
 
 
 def main():
     import qlib
 
-    qlib.init(provider_uri="~/.qlib/qlib_data/cn_data")
+    provider = os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data_a_share")
+    qlib.init(provider_uri=provider)
 
     from qlib.data import D
 
@@ -27,17 +29,17 @@ def main():
         D.features(instruments, fields, freq="day")
         .swaplevel()
         .sort_index()
-        .loc["2008-12-29":]
+        .loc["2015-01-01":]
         .sort_index()
     )
     data.to_hdf("./daily_pv_all.h5", key="data")
 
     debug_full = (
-        D.features(instruments, fields, start_time="2018-01-01", end_time="2019-12-31", freq="day")
+        D.features(instruments, fields, start_time="2023-01-01", end_time="2024-12-31", freq="day")
         .swaplevel()
         .sort_index()
     )
-    # Pick the first 100 instruments that actually exist in the 2018-2019 window
+    # Pick the first 100 instruments that exist in the debug window.
     # (some CSI300 names are delisted / not yet listed in that range).
     keep = debug_full.reset_index()["instrument"].unique()[:100]
     debug = debug_full.swaplevel().loc[keep].swaplevel().sort_index()

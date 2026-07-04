@@ -9,6 +9,9 @@ log/
 mlruns/
 pickle_cache/
 *.log
+work/
+artifacts/
+.pytest_cache/
 
 # python
 __pycache__/

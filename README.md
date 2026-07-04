@@ -1,62 +1,71 @@
 # rdagent-quant-local
 
-在 **Apple Silicon Mac** 上用 **DeepSeek + 本地 Ollama**（零 Docker、零额外云端 key）把微软
-[RD-Agent](https://github.com/microsoft/RD-Agent) 的 **量化因子自动 R&D 闭环**（`fin_factor`）一键跑通的可复现脚手架。
+面向 A 股的本地 RD-Agent 因子研发闭环。系统使用 DeepSeek 完成假设、编码和反馈，使用本地确定性向量嵌入，并在独立 Qlib 环境中训练 LightGBM、执行组合回测和 OOS 因子准入。
 
-> RD-Agent(Q) 让 LLM 自己「**提出因子假设 → 写因子代码 → 接入 Qlib 训练 LightGBM 回测 →
-> 和 SOTA 基线对比 → 给出反馈与下一步假设**」，持续自迭代累积超越基线的因子。
-
-## 已验证结果（首轮，成本约 $0.01）
-
-DeepSeek 自动提出 `Momentum_10d` / `Volatility_10d` 等因子并回测，新因子打败了 SOTA 基线：
-
-| 指标 | 新因子 | SOTA 基线 |
-|---|---|---|
-| IC | **0.0325** | 0.0311 |
-| 含成本年化超额 | **5.21%** | 4.10% |
-| 最大回撤 | **-11.3%** | -14.2% |
-
-## 一键搭建
+## 快速开始
 
 ```bash
-export DEEPSEEK_API_KEY=sk-你的key
-bash bootstrap.sh        # 幂等，可重复运行
-bash run.sh              # 跑 1 轮；bash run.sh 5 跑 5 轮
+export DEEPSEEK_API_KEY=你的密钥
+bash bootstrap.sh
+bash run.sh 1
 ```
 
-前置：macOS + [Homebrew](https://brew.sh)。其余（Miniconda、Ollama、Qlib、libomp 等）脚本自动装。
+`bootstrap.sh` 会恢复固定版本的上游 RD-Agent、创建两个 conda 环境、构建 A 股数据、注入交易配置并生成不含密钥的 `work/RD-Agent/.env`。`run.sh N` 运行 N 轮研发。
 
-## 架构（全本地、无 Docker）
+## 真实架构
 
-```
-              ┌─────────────────────────────┐
-  DeepSeek ───┤ conda env: rdagent          │  主控 + LLM + 因子代码执行
- (对话/推理)   │  - RD-Agent (LangGraph loop)│  FACTOR_CoSTEER_PYTHON_BIN 锁定此环境
-              │  - 提出假设/写因子/反馈       │
-              └──────────────┬──────────────┘
-  Ollama ────────────────────┘ embedding(nomic-embed-text)，DeepSeek 无 embedding 接口
- (本地嵌入)
-              ┌─────────────────────────────┐
-              │ conda env: rdagent4qlib     │  回测后端 (MODEL_CoSTEER_ENV_TYPE=conda)
-              │  - Qlib + LightGBM          │  qrun 在此环境跑，CSI300 日线
-              └─────────────────────────────┘
-   数据：~/.qlib/qlib_data/cn_data（A股日线） + CSI300 因子源 daily_pv.h5
+```text
+DeepSeek
+  -> RD-Agent workflow / CoSTEER
+     -> 假设生成
+     -> 因子代码生成、执行与评审
+     -> Qlib + LightGBM 训练
+     -> A 股组合回测
+     -> SOTA 对比与反馈
+  -> OOS factor gate
+     -> SQLite 实验注册表
 ```
 
-## 文件说明
+- `rdagent`：主控、DeepSeek 调用、因子代码执行。
+- `rdagent4qlib`：Qlib、LightGBM、数据构建和回测。
+- embedding：本地 512 维确定性 lexical hash，不依赖 Ollama 或额外云端接口。
+- 上游源码：固定到 `microsoft/RD-Agent@4f9ecb005881cddc08df0124a2e894c018007679`，恢复在 `work/RD-Agent`。
 
-| 文件 | 作用 |
+## A 股口径
+
+- 股票池：BaoStock 季度快照还原的历史沪深 300 成分，不使用当前成分回填历史。
+- 行情：AkShare/Eastmoney 日线，后复权后按证券归一化；异常 OHLC 整日屏蔽。
+- 当前数据：667 只历史成分股，1,639,868 行，交易日截至 2026-07-01。
+- 样本：训练 2015-2021，验证 2022-2023，测试 2024-2026-06-30。
+- 标签：信号日之后的下一开盘至再下一开盘收益。
+- 执行：开盘成交、涨跌停约束、5% 日成交量上限、买入 3bp、卖出 8bp、冲击成本 10%。
+- 因子准入：2024 年后 OOS 的覆盖率、绝对 Rank IC、绝对 ICIR 和月度方向稳定性；正向和反向有效因子一视同仁。
+
+## 已验证基线
+
+2026-07-02 的完整单轮运行生成并测试了 `Momentum_5d` 与 `Volatility_5d`：
+
+| 指标 | 基线 | 加入新因子 |
+|---|---:|---:|
+| IC | 0.016501 | 0.027028 |
+| Rank IC | 0.007199 | 0.022178 |
+| 扣费超额年化 | -12.5753% | -13.5156% |
+| 最大回撤 | -40.7406% | -43.5023% |
+
+IC 有提升，但收益和回撤恶化，因此 RD-Agent 没有替换 SOTA。独立因子门禁接受 `Volatility_5d`（Rank IC -0.03550、ICIR -0.13224、月度方向稳定率 73.33%），拒绝 `Momentum_5d`。这说明当前链路已经能够区分“有预测性”和“可形成更好组合收益”，而不是只生成报告。
+
+## 关键文件
+
+| 路径 | 作用 |
 |---|---|
-| `bootstrap.sh` | 端到端搭建（9 步，幂等）：系统依赖 → Miniconda → 克隆 RD-Agent → 两个 conda 环境 → 6 个坑补丁 → Ollama → Qlib 数据 → 生成 `.env` |
-| `run.sh` | 启动 `rdagent fin_factor`，自动带齐所有环境变量 |
-| `generate_csi300.py` | 只生成 CSI300 因子源数据（比全市场快十几倍，且含 `__main__` guard 防 macOS spawn 风暴） |
-| `.env.example` | 配置模板（真实 `.env` 由 bootstrap 生成且被 gitignore） |
-| `CODEX_CONTINUE.md` | **换机/换 Codex 接手必读**：当前状态、6 个坑及补丁、验证方法、下一步 |
+| `bootstrap.sh` | 恢复环境、数据和运行配置 |
+| `run.sh` | 数据新鲜度检查、健康检查、RD-Agent 运行、因子门禁 |
+| `a_share_pipeline/qlib_data.py` | 历史成分、行情清洗、Qlib 二进制发布 |
+| `a_share_pipeline/factor_gate.py` | OOS 因子评价和 SQLite 注册 |
+| `scripts/patch_rdagent_a_share.py` | 注入 A 股标签、交易和评审规则 |
+| `artifacts/experiments.sqlite3` | 因子实验注册表 |
+| `work/RD-Agent/git_ignore_folder/RD-Agent_workspace` | 因子代码和 Qlib 结果 |
 
 ## 安全
 
-`.env`（含真实 DeepSeek key）已被 `.gitignore`，不会进仓库。换机后由 `bootstrap.sh` 用你 `export` 的 key 重新生成。
-
-## 致谢
-
-基于 [microsoft/RD-Agent](https://github.com/microsoft/RD-Agent)（MIT）与 [microsoft/Qlib](https://github.com/microsoft/qlib)。本仓库仅为本地复现脚手架与踩坑补丁。
+密钥只通过当前 shell 的 `DEEPSEEK_API_KEY` 传入，不写入仓库或 `.env`。`work/`、行情缓存和回测产物均不提交。

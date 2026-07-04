@@ -1,27 +1,40 @@
 #!/usr/bin/env bash
-# 启动 RD-Agent(Q) 自动因子迭代。用法：bash run.sh [轮数，默认1]
 set -euo pipefail
 
-RDAGENT_DIR="${RDAGENT_DIR:-$HOME/Projects/agent-study/RD-Agent}"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RDAGENT_DIR="${RDAGENT_DIR:-$REPO_DIR/work/RD-Agent}"
 LOOP_N="${1:-1}"
-BREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
+QLIB_PROVIDER_URI="${QLIB_PROVIDER_URI:-$HOME/.qlib/qlib_data/cn_data_a_share}"
+: "${DEEPSEEK_API_KEY:?Export DEEPSEEK_API_KEY before running}"
 
-source "$HOME/miniconda3/etc/profile.d/conda.sh"
+CONDA_BIN="${CONDA_EXE:-$(command -v conda || true)}"
+[ -n "$CONDA_BIN" ] || { echo "conda is required" >&2; exit 1; }
+CONDA_ROOT="$(cd "$(dirname "$CONDA_BIN")/.." && pwd)"
+source "$CONDA_ROOT/etc/profile.d/conda.sh"
 conda activate rdagent
-
-# conda(供回测子进程 `conda run`) + ollama + brew bin 都进 PATH
-export PATH="$PATH:$HOME/miniconda3/condabin:$BREW_PREFIX/opt/ollama/bin:$BREW_PREFIX/bin"
-# MLflow 新版默认拒绝文件存储后端；LightGBM 需 libomp
+export PATH="$CONDA_ROOT/condabin:$PATH"
+export PYTHONPATH="$REPO_DIR:${PYTHONPATH:-}"
 export MLFLOW_ALLOW_FILE_STORE=true
-export DYLD_LIBRARY_PATH="$BREW_PREFIX/opt/libomp/lib:${DYLD_LIBRARY_PATH:-}"
+export DYLD_LIBRARY_PATH="$CONDA_ROOT/envs/rdagent4qlib/lib:${DYLD_LIBRARY_PATH:-}"
 
-# 确保 ollama 在跑
-curl -s http://localhost:11434/api/tags >/dev/null 2>&1 || \
-  ( nohup "$BREW_PREFIX/opt/ollama/bin/ollama" serve >/tmp/ollama_serve.log 2>&1 & sleep 4 )
+python - "$QLIB_PROVIDER_URI/metadata.json" <<'PY'
+import json, sys
+from datetime import date
+d=json.load(open(sys.argv[1]))
+age=(date.today()-date.fromisoformat(d['calendar_end'])).days
+if age > 10:
+    raise SystemExit(f"Qlib data is stale by {age} days; run bootstrap.sh")
+print(f"data gate: {d['instruments']} instruments through {d['calendar_end']}")
+PY
 
+run_start="$(date +%s)"
 cd "$RDAGENT_DIR"
-echo ">>> rdagent fin_factor --loop-n $LOOP_N  (日志见 $RDAGENT_DIR/log/)"
+python "$REPO_DIR/scripts/health_check.py"
 rdagent fin_factor --loop-n "$LOOP_N"
 
-echo ">>> 完成。可视化查看每轮假设/因子/回测："
-echo "    cd $RDAGENT_DIR && conda activate rdagent && rdagent ui"
+PYTHONPATH="$REPO_DIR" "$CONDA_ROOT/envs/rdagent4qlib/bin/python" \
+  "$REPO_DIR/scripts/factor_gate.py" \
+  --workspace "$RDAGENT_DIR/git_ignore_folder/RD-Agent_workspace" \
+  --prices "$RDAGENT_DIR/git_ignore_folder/factor_implementation_source_data/daily_pv.h5" \
+  --db "$REPO_DIR/artifacts/experiments.sqlite3" \
+  --since "$run_start"
